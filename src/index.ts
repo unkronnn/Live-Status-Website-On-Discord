@@ -37,110 +37,124 @@ const client = new Client({
 
 // --- HELPER: Get Emoji & Color based on Status ---
 const getStatusFormatting = (status: string) => {
-  const s = status.toLowerCase();
+  const s = status.toLowerCase().trim();
 
-  // "Undetect" → 🟢 Green
-  if (s.includes('undetect') || s.includes('undetected'))
-    return { emoji: '🟢', color: Colors.Green };
+  // Check for emojis first (from data.md format)
+  if (s.includes('✅') || s.includes('undetect') || s.includes('undetected') || s.includes('safe'))
+    return { emoji: '✅', color: Colors.Green };
 
-  // "On-Update" or "Maintenance" → 🛠️ Blue/Orange
-  if (s.includes('on-update') || s.includes('on update') || s.includes('maintenance') || s.includes('updating'))
+  if (s.includes('🛠️') || s.includes('on-update') || s.includes('on update') || s.includes('maintenance') || s.includes('updating') || s.includes('update'))
     return { emoji: '🛠️', color: Colors.Blue };
 
-  // "Closed" or "Detected" → ❌ Red
-  if (s.includes('closed') || s.includes('detected'))
+  if (s.includes('❌') || s.includes('closed') || s.includes('detected'))
     return { emoji: '❌', color: Colors.Red };
 
-  // "Risk" → ⚠️ Yellow
-  if (s.includes('risk'))
+  if (s.includes('⚠️') || s.includes('risk'))
     return { emoji: '⚠️', color: Colors.Yellow };
 
-  return { emoji: '⚪', color: Colors.Grey }; // Default
+  return { emoji: '⚪', color: Colors.Grey }; // Default for unknown
 };
 
 // --- SCRAPER FUNCTION ---
 const scrapeStatus = async (): Promise<GameGroup[]> => {
   try {
+    console.log(`[${new Date().toISOString()}] Scraping ${CONFIG.URL}...`);
+
+    // Anti-Blocking Strategy: Real browser headers to bypass Cloudflare/WAF
     const { data } = await axios.get(CONFIG.URL, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://indohax.net/',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0'
+      },
+      timeout: 15000 // 15 seconds timeout
     });
+
     const $ = cheerio.load(data);
-    const gameGroups: GameGroup[] = [];
-    let currentGame = '';
-    let currentProducts: Array<{ name: string; status: string }> = [];
+    const gamesMap = new Map<string, Array<{ name: string; status: string }>>();
 
-    // Logic to traverse hierarchical structure: Game Name (Header) -> Products (Items)
-    // This handles HTML with headers for games and list items/rows for products
-    $('table tbody tr').each((_, el) => {
-      const $el = $(el);
+    // The website uses a structured layout with:
+    // .pstat-game-section -> contains game name in data-game attribute
+    // .pstat-product-item -> individual product
+    // .pstat-product-name -> product name (format: "Product : Game")
+    // .pstat-product-status -> status div with class like "pstat-status-undetect"
 
-      // Check if this is a game header row (usually has different styling or colspan)
-      const isHeader = $el.find('td[colspan], th').length > 0;
+    $('.pstat-game-section').each((_, gameSection) => {
+      const $section = $(gameSection);
+      const gameName = $section.data('game') as string;
 
-      if (isHeader) {
-        // Save previous game group if exists
-        if (currentGame && currentProducts.length > 0) {
-          gameGroups.push({
-            gameName: currentGame,
-            products: [...currentProducts]
+      if (!gameName) return;
+
+      // Initialize products array for this game
+      if (!gamesMap.has(gameName)) {
+        gamesMap.set(gameName, []);
+      }
+
+      // Find all products in this game section
+      $section.find('.pstat-product-item').each((_, productItem) => {
+        const $product = $(productItem);
+
+        // Extract product name
+        const productNameEl = $product.find('.pstat-product-name').first();
+        const productText = productNameEl.text().trim();
+
+        // Extract status from the status div
+        const statusEl = $product.find('.pstat-product-status').first();
+        const statusClass = statusEl.attr('class') || '';
+
+        // Determine status from class name
+        let status = 'Unknown';
+        if (statusClass.includes('pstat-status-undetect')) status = 'Undetect';
+        else if (statusClass.includes('pstat-status-updating')) status = 'On-Update';
+        else if (statusClass.includes('pstat-status-risk')) status = 'Risk';
+        else if (statusClass.includes('pstat-status-closed')) status = 'Closed';
+
+        // Clean product name (remove ": Game" part)
+        const match = productText.match(/^(.+?)\s*:\s*.+$/);
+        const cleanProductName = match ? match[1].trim() : productText;
+
+        if (cleanProductName) {
+          gamesMap.get(gameName)!.push({
+            name: cleanProductName,
+            status: status
           });
         }
-
-        // Start new game group
-        currentGame = $el.text().trim();
-        currentProducts = [];
-      } else {
-        // This is a product row
-        const tds = $el.find('td');
-        if (tds.length >= 2) {
-          const productName = $(tds[0]).text().trim();
-          const status = $(tds[1]).text().trim();
-
-          if (productName && status) {
-            currentProducts.push({ name: productName, status });
-          }
-        }
-      }
+      });
     });
 
-    // Don't forget the last game group
-    if (currentGame && currentProducts.length > 0) {
+    // Convert Map to array
+    const gameGroups: GameGroup[] = [];
+    gamesMap.forEach((products, gameName) => {
       gameGroups.push({
-        gameName: currentGame,
-        products: currentProducts
+        gameName: gameName,
+        products: products
       });
-    }
+    });
 
-    // Alternative: If the site uses a standard table structure without headers,
-    // we group by the first column (Game Name)
+    // Sort game groups alphabetically
+    gameGroups.sort((a, b) => a.gameName.localeCompare(b.gameName));
+
+    // Debug: If no data found, log HTML snippet
     if (gameGroups.length === 0) {
-      const gamesMap = new Map<string, Array<{ name: string; status: string }>>();
-
-      $('table tbody tr').each((_, el) => {
-        const tds = $(el).find('td');
-        if (tds.length >= 3) {
-          const gameName = $(tds[0]).text().trim();
-          const productName = $(tds[1]).text().trim();
-          const status = $(tds[2]).text().trim();
-
-          if (gameName && productName) {
-            if (!gamesMap.has(gameName)) {
-              gamesMap.set(gameName, []);
-            }
-            gamesMap.get(gameName)!.push({ name: productName, status });
-          }
-        }
-      });
-
-      // Convert Map to array of GameGroup
-      gamesMap.forEach((products, gameName) => {
-        gameGroups.push({ gameName, products });
-      });
+      console.error('❌ No data found! Debug HTML snippet:');
+      console.log($.html().substring(0, 1000));
+    } else {
+      const totalProducts = gameGroups.reduce((acc, g) => acc + g.products.length, 0);
+      console.log(`✅ Successfully scraped ${gameGroups.length} games with ${totalProducts} products`);
     }
 
     return gameGroups;
   } catch (error) {
-    console.error('Error scraping data:', error);
+    console.error('❌ Error scraping data:', error);
     return [];
   }
 };
@@ -186,11 +200,11 @@ const generateEmbeds = (gameGroups: GameGroup[]) => {
 
 // --- MAIN UPDATE LOGIC ---
 const updateStatusMessage = async () => {
-  console.log(`[${new Date().toISOString()}] Fetching data...`);
+  console.log(`\n[${new Date().toISOString()}] 🔄 Starting update cycle...`);
   const data = await scrapeStatus();
 
   if (data.length === 0) {
-    console.log('No data found or scraping failed.');
+    console.log('⚠️ No data found or scraping failed. Will retry in 5 minutes.');
     return;
   }
 
@@ -198,7 +212,7 @@ const updateStatusMessage = async () => {
   const channel = await client.channels.fetch(CONFIG.CHANNEL_ID) as TextChannel;
 
   if (!channel) {
-    console.error('Channel not found!');
+    console.error('❌ Channel not found! Check your CHANNEL_ID in .env');
     return;
   }
 
@@ -207,20 +221,28 @@ const updateStatusMessage = async () => {
     if (activeMessageIds.length > 0) {
       // Check if embed count matches message count
       if (activeMessageIds.length === embeds.length) {
+        console.log(`📝 Editing ${activeMessageIds.length} existing messages...`);
         for (let i = 0; i < activeMessageIds.length; i++) {
-          const msg = await channel.messages.fetch(activeMessageIds[i]);
-          if (msg) await msg.edit({ embeds: [embeds[i]] });
+          try {
+            const msg = await channel.messages.fetch(activeMessageIds[i]);
+            if (msg) await msg.edit({ embeds: [embeds[i]] });
+          } catch (e) {
+            console.error(`❌ Failed to edit message ${activeMessageIds[i]}:`, e);
+            throw e; // Re-throw to trigger recreate
+          }
         }
-        console.log('Messages updated.');
+        console.log('✅ Messages updated successfully!');
         return;
       } else {
         // If the number of pages changed (e.g. new games added), delete old and resend
-        console.log('Page count changed, recreating messages...');
+        console.log(`🔄 Page count changed (${activeMessageIds.length} → ${embeds.length}), recreating messages...`);
         for (const id of activeMessageIds) {
           try {
             const msg = await channel.messages.fetch(id);
             if (msg) await msg.delete();
-          } catch (e) { /* ignore if already deleted */ }
+          } catch (e) {
+            console.log(`⚠️ Could not delete old message ${id}, continuing...`);
+          }
         }
         activeMessageIds = []; // Reset
       }
@@ -228,18 +250,16 @@ const updateStatusMessage = async () => {
 
     // Scenario B: No messages exist (or we just reset), send new ones
     if (activeMessageIds.length === 0) {
-      // Optional: Bulk delete previous bot messages to clean channel on restart
-      // await channel.bulkDelete(10);
-
+      console.log(`📤 Sending ${embeds.length} new message(s)...`);
       for (const embed of embeds) {
         const msg = await channel.send({ embeds: [embed] });
         activeMessageIds.push(msg.id);
       }
-      console.log(`Sent ${activeMessageIds.length} new messages.`);
+      console.log(`✅ Successfully sent ${activeMessageIds.length} message(s)!`);
     }
 
   } catch (error) {
-    console.error('Error sending/editing messages:', error);
+    console.error('❌ Error sending/editing messages:', error);
     // If critical error (e.g., message deleted manually), clear IDs to resend next time
     activeMessageIds = [];
   }
@@ -247,7 +267,12 @@ const updateStatusMessage = async () => {
 
 // --- INITIALIZATION ---
 client.once('ready', () => {
-  console.log(`Logged in as ${client.user?.tag}`);
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`✅ Bot successfully logged in as ${client.user?.tag}`);
+  console.log(`📍 Target Channel: ${CONFIG.CHANNEL_ID}`);
+  console.log(`🌐 Target URL: ${CONFIG.URL}`);
+  console.log(`⏰ Refresh Rate: ${CONFIG.REFRESH_RATE / 60000} minutes`);
+  console.log(`${'='.repeat(50)}\n`);
 
   // Run immediately on start
   updateStatusMessage();
