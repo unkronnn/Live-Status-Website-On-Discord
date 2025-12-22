@@ -164,31 +164,126 @@ const generateEmbeds = (gameGroups: GameGroup[]) => {
   const embeds: EmbedBuilder[] = [];
   const GAMES_PER_EMBED = 25; // Discord limits to 25 fields per embed
 
+  // Calculate overall statistics
+  const totalProducts = gameGroups.reduce((acc, g) => acc + g.products.length, 0);
+  const statusCounts = {
+    undetect: 0,
+    updating: 0,
+    risk: 0,
+    closed: 0
+  };
+
+  gameGroups.forEach(game => {
+    game.products.forEach(product => {
+      const s = product.status.toLowerCase();
+      if (s.includes('undetect')) statusCounts.undetect++;
+      else if (s.includes('update')) statusCounts.updating++;
+      else if (s.includes('risk')) statusCounts.risk++;
+      else if (s.includes('closed')) statusCounts.closed++;
+    });
+  });
+
+  // Determine embed color based on overall health
+  const getEmbedColor = () => {
+    const total = statusCounts.undetect + statusCounts.updating + statusCounts.risk + statusCounts.closed;
+    const undetectPercentage = total > 0 ? (statusCounts.undetect / total) * 100 : 0;
+
+    if (undetectPercentage >= 80) return Colors.Green; // Mostly healthy
+    if (undetectPercentage >= 50) return Colors.Blue;  // Mixed
+    if (statusCounts.closed > statusCounts.undetect) return Colors.Red; // Mostly down
+    return Colors.Gold; // Warning state
+  };
+
   // Split games into chunks of 25
   for (let i = 0; i < gameGroups.length; i += GAMES_PER_EMBED) {
     const chunk = gameGroups.slice(i, i + GAMES_PER_EMBED);
+    const pageNum = Math.floor(i / GAMES_PER_EMBED) + 1;
+    const totalPages = Math.ceil(gameGroups.length / GAMES_PER_EMBED);
+
+    // Create description with stats
+    const description = [
+      '```',
+      '┌─────────────────────────────────────┐',
+      '│    🛡️ INDOHAX STATUS MONITOR        │',
+      '│    Live Cheat Status Tracker        │',
+      '└─────────────────────────────────────┘',
+      '```',
+      '',
+      '**📊 Overall Status:**',
+      `✅ **Undetect:** ${statusCounts.undetect} │ `,
+      `🛠️ **Updating:** ${statusCounts.updating} │ `,
+      `⚠️ **Risk:** ${statusCounts.risk} │ `,
+      `❌ **Closed:** ${statusCounts.closed}`,
+      '',
+      `**🎮 Monitoring:** ${totalProducts} products across ${gameGroups.length} games`,
+      `**🔄 Auto-refresh:** Every 5 minutes`,
+      ''
+    ].join('\n');
 
     const embed = new EmbedBuilder()
-      .setTitle(`🛡️ Indohax Status Monitor`)
-      .setDescription(`Live cheat status updates. Refreshes every 5 minutes.`)
+      .setTitle(`🎮 Cheat Status Monitor${totalPages > 1 ? ` ── Page ${pageNum}/${totalPages}` : ''}`)
+      .setDescription(description)
       .setURL(CONFIG.URL)
       .setTimestamp()
-      .setColor(Colors.Blue); // Default blue color
-      // .setFooter({ text: `Page ${Math.floor(i / GAMES_PER_EMBED) + 1}/${Math.ceil(gameGroups.length / GAMES_PER_EMBED)} • Auto-refreshing` });
+      .setColor(getEmbedColor())
+      .setAuthor({
+        name: '🛡️ INDOHAX Status Tracker',
+        url: CONFIG.URL
+      })
+      .setFooter({
+        text: `🕐 ${new Date().toLocaleString('en-US', {
+          timeZone: 'UTC',
+          hour12: false,
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        })} UTC  •  Auto-refresh every 5min`
+      });
 
-    // Add each game as a field with all products listed
-    chunk.forEach(gameGroup => {
-      const fieldValue = gameGroup.products
-        .map(product => {
-          const { emoji } = getStatusFormatting(product.status);
-          return `${emoji} ${product.name}`;
-        })
-        .join('\n');
+    // Add games as fields with better formatting
+    chunk.forEach((gameGroup, index) => {
+      // Group products by status for better visual
+      const productsByStatus: { [key: string]: string[] } = {
+        Undetect: [],
+        'On-Update': [],
+        Risk: [],
+        Closed: []
+      };
 
+      gameGroup.products.forEach(product => {
+        const statusKey = product.status === 'Undetect' ? 'Undetect' :
+                         product.status === 'On-Update' ? 'On-Update' :
+                         product.status === 'Risk' ? 'Risk' : 'Closed';
+        productsByStatus[statusKey].push(product.name);
+      });
+
+      // Build field value with status grouping
+      const fieldValueParts: string[] = [];
+
+      if (productsByStatus.Undetect.length > 0) {
+        fieldValueParts.push(`**✅ UNDETECT**\n${productsByStatus.Undetect.map(p => `├─ ${p}`).join('\n')}`);
+      }
+      if (productsByStatus['On-Update'].length > 0) {
+        fieldValueParts.push(`**🛠️ UPDATING**\n${productsByStatus['On-Update'].map(p => `├─ ${p}`).join('\n')}`);
+      }
+      if (productsByStatus.Risk.length > 0) {
+        fieldValueParts.push(`**⚠️ RISK**\n${productsByStatus.Risk.map(p => `├─ ${p}`).join('\n')}`);
+      }
+      if (productsByStatus.Closed.length > 0) {
+        fieldValueParts.push(`**❌ CLOSED**\n${productsByStatus.Closed.map(p => `├─ ${p}`).join('\n')}`);
+      }
+
+      const fieldValue = fieldValueParts.length > 0
+        ? fieldValueParts.join('\n\n')
+        : '`No products available`';
+
+      // Add field with better formatting
       embed.addFields({
-        name: `**${gameGroup.gameName}**`,
-        value: fieldValue || 'No products available',
-        inline: true // Use inline to fit multiple games side-by-side
+        name: `${index + 1}. **${gameGroup.gameName}**`,
+        value: fieldValue,
+        inline: false // Better readability
       });
     });
 
