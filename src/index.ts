@@ -4,7 +4,11 @@ import {
   TextChannel,
   EmbedBuilder,
   Colors,
-  Message
+  Message,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType
 } from 'discord.js';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
@@ -28,8 +32,11 @@ interface GameGroup {
   }>;
 }
 
-// Global variable to store Message IDs to edit them later
-let activeMessageIds: string[] = [];
+// Global state
+let activeMessageId: string | null = null;
+let currentPage = 1;
+let totalPages = 1;
+let allGameGroups: GameGroup[] = [];
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
@@ -159,19 +166,14 @@ const scrapeStatus = async (): Promise<GameGroup[]> => {
   }
 };
 
-// --- EMBED BUILDER ---
-const generateEmbeds = (gameGroups: GameGroup[]) => {
-  const embeds: EmbedBuilder[] = [];
-  const GAMES_PER_EMBED = 25; // Discord limits to 25 fields per embed
+// --- EMBED BUILDER (Single Page) ---
+const generateEmbed = (gameGroups: GameGroup[], page: number) => {
+  const GAMES_PER_PAGE = 20; // Reduced for cleaner look
+  const totalPages = Math.ceil(gameGroups.length / GAMES_PER_PAGE);
 
-  // Calculate overall statistics
+  // Calculate overall statistics (from ALL games, not just current page)
   const totalProducts = gameGroups.reduce((acc, g) => acc + g.products.length, 0);
-  const statusCounts = {
-    undetect: 0,
-    updating: 0,
-    risk: 0,
-    closed: 0
-  };
+  const statusCounts = { undetect: 0, updating: 0, risk: 0, closed: 0 };
 
   gameGroups.forEach(game => {
     game.products.forEach(product => {
@@ -183,118 +185,106 @@ const generateEmbeds = (gameGroups: GameGroup[]) => {
     });
   });
 
-  // Determine embed color based on overall health
-  const getEmbedColor = () => {
-    const total = statusCounts.undetect + statusCounts.updating + statusCounts.risk + statusCounts.closed;
-    const undetectPercentage = total > 0 ? (statusCounts.undetect / total) * 100 : 0;
+  // Determine embed color
+  const total = statusCounts.undetect + statusCounts.updating + statusCounts.risk + statusCounts.closed;
+  const undetectPercentage = total > 0 ? (statusCounts.undetect / total) * 100 : 0;
 
-    if (undetectPercentage >= 80) return Colors.Green; // Mostly healthy
-    if (undetectPercentage >= 50) return Colors.Blue;  // Mixed
-    if (statusCounts.closed > statusCounts.undetect) return Colors.Red; // Mostly down
-    return Colors.Gold; // Warning state
+  const getEmbedColor = () => {
+    if (undetectPercentage >= 80) return Colors.Green;
+    if (undetectPercentage >= 50) return Colors.Blue;
+    if (statusCounts.closed > statusCounts.undetect) return Colors.Red;
+    return Colors.Gold;
   };
 
-  // Split games into chunks of 25
-  for (let i = 0; i < gameGroups.length; i += GAMES_PER_EMBED) {
-    const chunk = gameGroups.slice(i, i + GAMES_PER_EMBED);
-    const pageNum = Math.floor(i / GAMES_PER_EMBED) + 1;
-    const totalPages = Math.ceil(gameGroups.length / GAMES_PER_EMBED);
+  // Get games for current page
+  const startIndex = (page - 1) * GAMES_PER_PAGE;
+  const endIndex = startIndex + GAMES_PER_PAGE;
+  const pageGames = gameGroups.slice(startIndex, endIndex);
 
-    // Create description with stats
-    const description = [
-      '```',
-      '┌─────────────────────────────────────┐',
-      '│    🛡️ INDOHAX STATUS MONITOR        │',
-      '│    Live Cheat Status Tracker        │',
-      '└─────────────────────────────────────┘',
-      '```',
-      '',
-      '**📊 Overall Status:**',
-      `✅ **Undetect:** ${statusCounts.undetect} │ `,
-      `🛠️ **Updating:** ${statusCounts.updating} │ `,
-      `⚠️ **Risk:** ${statusCounts.risk} │ `,
-      `❌ **Closed:** ${statusCounts.closed}`,
-      '',
-      `**🎮 Monitoring:** ${totalProducts} products across ${gameGroups.length} games`,
-      `**🔄 Auto-refresh:** Every 5 minutes`,
-      ''
-    ].join('\n');
+  // Create clean description
+  const description = [
+    '>>> ',
+    `**📊 Status:** ${statusCounts.undetect}✅  ${statusCounts.updating}🛠️  ${statusCounts.risk}⚠️  ${statusCounts.closed}❌`,
+    `\n**🎮 Total:** ${totalProducts} products • ${gameGroups.length} games`,
+    `**🔄 Updates:** Every 5 min`
+  ].join('\n');
 
-    const embed = new EmbedBuilder()
-      .setTitle(`🎮 Cheat Status Monitor${totalPages > 1 ? ` ── Page ${pageNum}/${totalPages}` : ''}`)
-      .setDescription(description)
-      .setURL(CONFIG.URL)
-      .setTimestamp()
-      .setColor(getEmbedColor())
-      .setAuthor({
-        name: '🛡️ INDOHAX Status Tracker',
-        url: CONFIG.URL
-      })
-      .setFooter({
-        text: `🕐 ${new Date().toLocaleString('en-US', {
-          timeZone: 'UTC',
-          hour12: false,
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit'
-        })} UTC  •  Auto-refresh every 5min`
-      });
-
-    // Add games as fields with better formatting
-    chunk.forEach((gameGroup, index) => {
-      // Group products by status for better visual
-      const productsByStatus: { [key: string]: string[] } = {
-        Undetect: [],
-        'On-Update': [],
-        Risk: [],
-        Closed: []
-      };
-
-      gameGroup.products.forEach(product => {
-        const statusKey = product.status === 'Undetect' ? 'Undetect' :
-                         product.status === 'On-Update' ? 'On-Update' :
-                         product.status === 'Risk' ? 'Risk' : 'Closed';
-        productsByStatus[statusKey].push(product.name);
-      });
-
-      // Build field value with status grouping
-      const fieldValueParts: string[] = [];
-
-      if (productsByStatus.Undetect.length > 0) {
-        fieldValueParts.push(`**✅ UNDETECT**\n${productsByStatus.Undetect.map(p => `├─ ${p}`).join('\n')}`);
-      }
-      if (productsByStatus['On-Update'].length > 0) {
-        fieldValueParts.push(`**🛠️ UPDATING**\n${productsByStatus['On-Update'].map(p => `├─ ${p}`).join('\n')}`);
-      }
-      if (productsByStatus.Risk.length > 0) {
-        fieldValueParts.push(`**⚠️ RISK**\n${productsByStatus.Risk.map(p => `├─ ${p}`).join('\n')}`);
-      }
-      if (productsByStatus.Closed.length > 0) {
-        fieldValueParts.push(`**❌ CLOSED**\n${productsByStatus.Closed.map(p => `├─ ${p}`).join('\n')}`);
-      }
-
-      const fieldValue = fieldValueParts.length > 0
-        ? fieldValueParts.join('\n\n')
-        : '`No products available`';
-
-      // Add field with better formatting
-      embed.addFields({
-        name: `${index + 1}. **${gameGroup.gameName}**`,
-        value: fieldValue,
-        inline: false // Better readability
-      });
+  const embed = new EmbedBuilder()
+    .setTitle(`🛡️ INDOHAX Status Monitor ${totalPages > 1 ? `│ Page ${page}/${totalPages}` : ''}`)
+    .setDescription(description)
+    .setURL(CONFIG.URL)
+    .setTimestamp()
+    .setColor(getEmbedColor())
+    .setFooter({
+      text: `🕐 ${new Date().toLocaleString('en-US', {
+        timeZone: 'UTC',
+        hour12: false,
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })} UTC`
     });
 
-    embeds.push(embed);
-  }
+  // Add games as fields
+  pageGames.forEach((gameGroup) => {
+    const productItems = gameGroup.products.map(product => {
+      const emoji = product.status === 'Undetect' ? '✅' :
+                   product.status === 'On-Update' ? '🛠️' :
+                   product.status === 'Risk' ? '⚠️' : '❌';
+      return `${emoji} ${product.name}`;
+    });
 
-  return embeds;
+    const fieldValue = productItems.length > 0
+      ? productItems.join(' • ')
+      : '`No products`';
+
+    embed.addFields({
+      name: gameGroup.gameName,
+      value: fieldValue,
+      inline: false
+    });
+  });
+
+  return { embed, totalPages };
+};
+
+// --- CREATE BUTTON ROW ---
+const createButtonRow = (page: number, totalPages: number) => {
+  const row = new ActionRowBuilder<ButtonBuilder>();
+
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId('first')
+      .setLabel('⏮ First')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === 1),
+    new ButtonBuilder()
+      .setCustomId('prev')
+      .setLabel('◀ Prev')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(page === 1),
+    new ButtonBuilder()
+      .setCustomId('next')
+      .setLabel('Next ▶')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(page === totalPages),
+    new ButtonBuilder()
+      .setCustomId('last')
+      .setLabel('⏭ Last')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === totalPages),
+    new ButtonBuilder()
+      .setCustomId('refresh')
+      .setLabel('🔄 Refresh')
+      .setStyle(ButtonStyle.Success)
+  );
+
+  return row;
 };
 
 // --- MAIN UPDATE LOGIC ---
-const updateStatusMessage = async () => {
+const updateStatusMessage = async (isNewMessage = false) => {
   console.log(`\n[${new Date().toISOString()}] 🔄 Starting update cycle...`);
   const data = await scrapeStatus();
 
@@ -303,7 +293,9 @@ const updateStatusMessage = async () => {
     return;
   }
 
-  const embeds = generateEmbeds(data);
+  // Store all game groups globally
+  allGameGroups = data;
+
   const channel = await client.channels.fetch(CONFIG.CHANNEL_ID) as TextChannel;
 
   if (!channel) {
@@ -312,52 +304,107 @@ const updateStatusMessage = async () => {
   }
 
   try {
-    // Scenario A: We have stored Message IDs, let's try to edit them
-    if (activeMessageIds.length > 0) {
-      // Check if embed count matches message count
-      if (activeMessageIds.length === embeds.length) {
-        console.log(`📝 Editing ${activeMessageIds.length} existing messages...`);
-        for (let i = 0; i < activeMessageIds.length; i++) {
-          try {
-            const msg = await channel.messages.fetch(activeMessageIds[i]);
-            if (msg) await msg.edit({ embeds: [embeds[i]] });
-          } catch (e) {
-            console.error(`❌ Failed to edit message ${activeMessageIds[i]}:`, e);
-            throw e; // Re-throw to trigger recreate
-          }
-        }
-        console.log('✅ Messages updated successfully!');
-        return;
-      } else {
-        // If the number of pages changed (e.g. new games added), delete old and resend
-        console.log(`🔄 Page count changed (${activeMessageIds.length} → ${embeds.length}), recreating messages...`);
-        for (const id of activeMessageIds) {
-          try {
-            const msg = await channel.messages.fetch(id);
-            if (msg) await msg.delete();
-          } catch (e) {
-            console.log(`⚠️ Could not delete old message ${id}, continuing...`);
-          }
-        }
-        activeMessageIds = []; // Reset
-      }
+    const { embed, totalPages: newTotalPages } = generateEmbed(allGameGroups, currentPage);
+    totalPages = newTotalPages;
+
+    const components = createButtonRow(currentPage, totalPages);
+
+    // Reset to page 1 if out of bounds
+    if (currentPage > totalPages) {
+      currentPage = 1;
+      await updateStatusMessage(isNewMessage);
+      return;
     }
 
-    // Scenario B: No messages exist (or we just reset), send new ones
-    if (activeMessageIds.length === 0) {
-      console.log(`📤 Sending ${embeds.length} new message(s)...`);
-      for (const embed of embeds) {
-        const msg = await channel.send({ embeds: [embed] });
-        activeMessageIds.push(msg.id);
+    if (activeMessageId && !isNewMessage) {
+      // Edit existing message
+      const msg = await channel.messages.fetch(activeMessageId);
+      if (msg) {
+        await msg.edit({
+          embeds: [embed],
+          components: [components]
+        });
+        console.log(`✅ Message updated! (Page ${currentPage}/${totalPages})`);
       }
-      console.log(`✅ Successfully sent ${activeMessageIds.length} message(s)!`);
+    } else {
+      // Send new message
+      if (activeMessageId) {
+        try {
+          const oldMsg = await channel.messages.fetch(activeMessageId);
+          if (oldMsg) await oldMsg.delete();
+        } catch (e) {
+          console.log('⚠️ Could not delete old message');
+        }
+      }
+
+      const msg = await channel.send({
+        embeds: [embed],
+        components: [components]
+      });
+      activeMessageId = msg.id;
+      console.log(`✅ New message sent! (Page ${currentPage}/${totalPages})`);
     }
+
+    // Setup button collector
+    setupButtonCollector(channel);
 
   } catch (error) {
-    console.error('❌ Error sending/editing messages:', error);
-    // If critical error (e.g., message deleted manually), clear IDs to resend next time
-    activeMessageIds = [];
+    console.error('❌ Error sending/editing message:', error);
+    activeMessageId = null;
   }
+};
+
+// --- BUTTON COLLECTOR ---
+const setupButtonCollector = (channel: TextChannel) => {
+  if (!activeMessageId) return;
+
+  // Create collector for button interactions
+  const filter = (i: any) => i.user.id === client.user?.id || i.message.id === activeMessageId;
+  const collector = channel.createMessageComponentCollector({
+    filter,
+    componentType: ComponentType.Button,
+    time: 5 * 60 * 1000 // 5 minutes
+  });
+
+  collector.on('collect', async (interaction) => {
+    if (!interaction.isButton()) return;
+
+    const { customId } = interaction;
+
+    if (customId === 'first') currentPage = 1;
+    else if (customId === 'prev') currentPage = Math.max(1, currentPage - 1);
+    else if (customId === 'next') currentPage = Math.min(totalPages, currentPage + 1);
+    else if (customId === 'last') currentPage = totalPages;
+    else if (customId === 'refresh') {
+      // Force refresh data
+      await interaction.update({ content: '🔄 Refreshing data...', embeds: [], components: [] });
+      await scrapeStatus().then(data => {
+        allGameGroups = data;
+      });
+      currentPage = 1;
+      await updateStatusMessage(false);
+      return;
+    }
+
+    // Update embed
+    const { embed } = generateEmbed(allGameGroups, currentPage);
+    const components = createButtonRow(currentPage, totalPages);
+
+    await interaction.update({
+      embeds: [embed],
+      components: [components]
+    });
+
+    // Reset collector timer
+    collector.resetTimer();
+  });
+
+  collector.on('end', async () => {
+    console.log('⏰ Button collector expired, refreshing...');
+    // Auto-refresh after 5 minutes
+    currentPage = 1;
+    await updateStatusMessage(false);
+  });
 };
 
 // --- INITIALIZATION ---
