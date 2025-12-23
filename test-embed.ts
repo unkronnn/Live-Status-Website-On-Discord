@@ -155,43 +155,20 @@ const testEmbed = async () => {
 
   // Fields
   previewGroups.forEach((gameGroup, index) => {
-    const productsByStatus: { [key: string]: string[] } = {
-      Undetect: [],
-      'On-Update': [],
-      Risk: [],
-      Closed: []
-    };
-
-    gameGroup.products.forEach(product => {
-      const statusKey = product.status === 'Undetect' ? 'Undetect' :
-                       product.status === 'On-Update' ? 'On-Update' :
-                       product.status === 'Risk' ? 'Risk' : 'Closed';
-      productsByStatus[statusKey].push(product.name);
+    // Build compact product list
+    const productItems = gameGroup.products.map(product => {
+      const emoji = product.status === 'Undetect' ? '✅' :
+                   product.status === 'On-Update' ? '🛠️' :
+                   product.status === 'Risk' ? '⚠️' : '❌';
+      return `${emoji} ${product.name}`;
     });
 
-    console.log(`${index + 1}. **${gameGroup.gameName}**`);
-    console.log('');
+    const fieldValue = productItems.length > 0
+      ? productItems.join(' • ')
+      : 'No products available';
 
-    if (productsByStatus.Undetect.length > 0) {
-      console.log(`**✅ UNDETECT**`);
-      productsByStatus.Undetect.forEach(p => console.log(`├─ ${p}`));
-    }
-    if (productsByStatus['On-Update'].length > 0) {
-      console.log('');
-      console.log(`**🛠️ UPDATING**`);
-      productsByStatus['On-Update'].forEach(p => console.log(`├─ ${p}`));
-    }
-    if (productsByStatus.Risk.length > 0) {
-      console.log('');
-      console.log(`**⚠️ RISK**`);
-      productsByStatus.Risk.forEach(p => console.log(`├─ ${p}`));
-    }
-    if (productsByStatus.Closed.length > 0) {
-      console.log('');
-      console.log(`**❌ CLOSED**`);
-      productsByStatus.Closed.forEach(p => console.log(`├─ ${p}`));
-    }
-
+    console.log(`**${gameGroup.gameName}**`);
+    console.log(fieldValue);
     console.log('');
     console.log('─'.repeat(60));
     console.log('');
